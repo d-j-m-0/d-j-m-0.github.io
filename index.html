@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>spotled web bluetooth</title>
+<style>
+    body {
+        font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    @font-face {
+        font-family: 'Bebas';
+        font-style: normal;
+        font-weight: 400;
+        src: local('Bebas'), local('Bebas-Regular'),
+            url(https://allfont.ru/cache/fonts/bebas_518334c99698c1e4ae561dbbcb898d6f.woff) format('woff'),
+            url(https://allfont.ru/cache/fonts/bebas_518334c99698c1e4ae561dbbcb898d6f.ttf) format('truetype');
+    }
+    @font-face {
+        font-family: 'Comic Sans MS';
+        font-style: normal;
+        font-weight: 400;
+        src: local('Comic Sans MS'), local('ComicSansMS-Regular'),
+            url(https://allfont.ru/cache/fonts/comic-sans-ms_53a8778a817839ef2dbc5dc94ce14334.woff) format('woff'),
+            url(https://allfont.ru/cache/fonts/comic-sans-ms_53a8778a817839ef2dbc5dc94ce14334.ttf) format('truetype');
+    }
+</style>
+<link rel="preconnect" href="https://fonts.gstatic.com">
+<link href="https://fonts.googleapis.com/css?family=Silkscreen" rel="stylesheet">
+</head>
+<body>
+    <p>
+        <strong>Connection Status: </strong><span id="connection_status">Disconnected</span>
+        <button id="search">Connect Device</button><br />
+        <strong>Display Info: </strong><span id="display_info"></span>
+    </p>
+    <p>
+        <label>Brightness: <input type="range" id="brightness" min="0" max="100" disabled/></label>
+    </p>
+    <p>
+        <label>Display Mode:
+        <select id="display_mode" disabled>
+            <option selected>NORMAL</option>
+            <option>UPSIDE_DOWN</option>
+            <option>MIRROR</option>
+            <option>MIRROR_UPSIDE_DOWN</option>
+        </select></label>
+    </p>
+    <fieldset>
+        <legend>Native Text</legend>
+        <p><label>Set Text <input id="text" type="text" value="abc" /></label><button id="set_text" disabled>Set Text</button><button id="clear" disabled>Clear</button></p>
+    </fieldset>
+    <fieldset>
+        <legend>Bitmap Text</legend>
+        <label for="font">Font</label>
+        <select name="font" id="font">
+            <option>Arial</option>
+            <option>Arial Black</option>
+            <option>Bebas</option>
+            <option>Comic Sans MS</option>
+            <option selected>Silkscreen</option>
+        </select>
+        <p><label>Set Text <input id="text2" type="text" value="hello" maxlength="120" /></label><button id="set_text2">Set Text</button><button id="set_time">Set Time</button><button id="clear2">Clear</button></p>
+        <p><label>Font Size: <input type="range" id="font_size" min="10" max="20" value="16" step="0.5" /></label><span id="font_size_value">16px</span></p>
+        <p><label>Letter Spacing: <input type="range" id="letterSpacing" min="-5" max="5" value="-1" step="0.2" /></label><span id="letterSpacingValue">-1px</span></p>
+        <p><label>Speed: <input type="range" id="speed" min="1" max="200" value="20" disabled /></label></p>
+        <canvas id="canvas2" style="image-rendering: pixelated; border: 1px solid; width:100%" width="48" height="12"></canvas><br/>
+    </fieldset>
+    <fieldset>
+        <legend>Bitmap Drawing</legend>
+        <canvas id="canvas" style="image-rendering: pixelated; border: 1px solid; width:100%" width="48" height="12"></canvas><br/>
+        <label>Threshold Value <input type="range" min="0" max="255" value="120" id="threshold"></label><br>
+        <input id="upload" type="file" accept="image/*" capture><button id="set_image">Set Image</button><button id="clear_canvas">Clear</button>
+    </fieldset>
+
+<script>
+    function calcChecksum(data) {
+        const v = new Uint8Array(data)
+        let value = BigInt(0)
+        for (let i = 0; i < v.length; i++) {
+            value += BigInt(0xff & v[i])
+        }
+        if (value > 255) {
+            value = (~value) + 1n
+        }
+        return Number(BigInt.asUintN(8, value))
+    }
+
+    class Deferred {
+        constructor() {
+            this.promise = new Promise((resolve, reject)=> {
+                this.reject = reject
+                this.resolve = resolve
+            })
+        }
+    }
+
+    class SendingDataStartCommand {
+        serialNo = 0
+
+        constructor(commandType, commandLength) {
+            this.commandType = commandType
+            this.commandLength = commandLength
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(10))
+            v.setUint8(0, 10) // length of header
+            v.setUint8(1, 1) // SendingDataStartCommand
+            v.setUint16(2, this.serialNo)
+            v.setUint16(4, this.commandType)
+            v.setUint32(6, this.commandLength)
+            return v.buffer
+        }
+    }
+
+    class SendingDataFinishCommand {
+        serialNo = 0
+
+        constructor(commandType, commandLength) {
+            this.commandType = commandType
+            this.commandLength = commandLength
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(10))
+            v.setUint8(0, 10) // length of header
+            v.setUint8(1, 3) // SendingDataFinishCommand
+            v.setUint16(2, this.serialNo)
+            v.setUint16(4, this.commandType)
+            v.setUint32(6, this.commandLength)
+            return v.buffer
+        }
+    }
+
+    class GetVersionCommand {
+        serialNo = 0
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(4))
+            v.setUint8(0, 4) // length
+            v.setUint8(1, 16) // GetVersionCommand
+            v.setUint16(2, this.serialNo)
+            return v.buffer
+        }
+    }
+
+    class GetDisplayInfoCommand {
+        serialNo = 0
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(4))
+            v.setUint8(0, 4) // length
+            v.setUint8(1, 18) // GetDisplayInfoCommand
+            v.setUint16(2, this.serialNo)
+            return v.buffer
+        }
+    }
+
+    class GetBufferSizeCommand {
+        serialNo = 0
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(4))
+            v.setUint8(0, 4) // length
+            v.setUint8(1, 20) // GetBufferSizeCommand
+            v.setUint16(2, this.serialNo)
+            return v.buffer
+        }
+    }
+
+    class SendDataCommand {
+        serialNo = 0
+
+        constructor(commandType, payload) {
+            this.commandType = commandType
+            this.payload = payload
+        }
+
+        serialize() {
+            const buffer = new ArrayBuffer(this.payload.byteLength + 15)
+            const v = new DataView(buffer)
+            v.setUint32(0, 15) // length of header
+            v.setUint16(4, this.commandType)
+            v.setUint32(6, this.serialNo)
+            v.setUint32(10, this.payload.byteLength)
+            v.setUint8(14, calcChecksum(buffer.slice(0, 14)))
+            const uint8 = new Uint8Array(buffer)
+            uint8.set(new Uint8Array(this.payload), 15)
+            return buffer
+        }
+    }
+
+    class BrightnessData {
+        constructor(brightness) {
+            this.brightness = brightness
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(8))
+            v.setUint32(0, 8) // length
+            v.setUint16(4, 14) // type
+            v.setUint8(6, this.brightness)
+            v.setUint8(7, calcChecksum(v.buffer.slice(0, 8)))
+            return v.buffer
+        }
+    }
+
+    class ScreenModeData {
+        constructor(mode) {
+            switch(mode) {
+                case "NORMAL":
+                    this.mode = 0
+                    break
+                case "UPSIDE_DOWN":
+                    this.mode = 1
+                    break
+                case "MIRROR":
+                    this.mode = 2
+                    break
+                case "MIRROR_UPSIDE_DOWN":
+                    this.mode = 3
+                    break
+                default:
+                    this.mode = mode
+            }
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(8))
+            v.setUint32(0, 8) // length
+            v.setUint16(4, 15) // type
+            v.setUint8(6, this.mode)
+            v.setUint8(7, calcChecksum(v.buffer.slice(0, 8)))
+            return v.buffer
+        }
+    }
+
+    class FontData {
+        constructor(fontChars) {
+            this.fontChars = fontChars
+        }
+
+        serialize() {
+            const fontCharData = this.fontChars.map(c => c.serialize())
+            console.log('fontCharData', fontCharData)
+            const fontCharDataLen = fontCharData.reduce((sum, char) => sum + char.byteLength, 0)
+            const v = new DataView(new ArrayBuffer(9 + fontCharDataLen))
+            v.setUint32(0, 9) // length
+            v.setUint16(4, 5) // type
+            v.setUint16(6, this.fontChars.length)
+            v.setUint8(8, calcChecksum(v.buffer.slice(0, 8)))
+            const uint8 = new Uint8Array(v.buffer)
+            let offset = 9
+            for (let i = 0; i < fontCharData.length; i++) {
+                uint8.set(new Uint8Array(fontCharData[i]), offset)
+                offset += fontCharData[i].byteLength
+            }
+            return v.buffer
+        }
+    }
+
+    class FontCharacterData {
+        constructor(width, height, character, bitmap) {
+            this.width = width
+            this.height = height
+            this.character = character
+            this.bitmap = bitmap
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(this.bitmap.byteLength + 15))
+            v.setUint32(0, this.bitmap.byteLength + 15) // length
+            v.setUint16(4, 13) // type
+            v.setUint8(6, 1)
+            v.setUint16(7, this.width)
+            v.setUint16(9, this.height)
+            v.setUint16(11, this.character.codePointAt(0))
+            v.setUint8(13, this.bitmap.byteLength)
+            const uint8 = new Uint8Array(v.buffer)
+            uint8.set(new Uint8Array(this.bitmap), 14)
+            v.setUint8(this.bitmap.byteLength + 14, calcChecksum(v.buffer))
+            return v.buffer
+        }
+    }
+
+    class ColorData {
+        constructor(red, green, blue) {
+            this.red = red
+            this.green = green
+            this.blue = blue
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(10))
+            v.setUint32(0, 10) // length
+            v.setUint16(4, 2) // type
+            v.setUint8(6, this.red)
+            v.setUint8(7, this.green)
+            v.setUint8(8, this.blue)
+            v.setUint8(9, calcChecksum(v.buffer))
+            return v.buffer
+        }
+    }
+
+    class CharacterData {
+        constructor(char) {
+            this.char = char
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(9))
+            v.setUint32(0, 9) // length
+            v.setUint16(4, 3) // type
+            v.setUint16(6, this.char.codePointAt(0))
+            v.setUint8(8, calcChecksum(v.buffer))
+            return v.buffer
+        }
+    }
+
+    class TextData {
+        constructor(text, speed, effect, colors=null) {
+            this.text = text
+            this.speed = speed
+            this.effect = effect
+            this.colors = colors
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(10 + this.text.length*19 + 8 + 10 + 8))
+            const uint8 = new Uint8Array(v.buffer)
+            v.setUint32(0, 10) // length
+            v.setUint16(4, 4) // type
+            v.setUint16(6, this.text.length)
+            v.setUint8(8, 1)
+            v.setUint8(9, calcChecksum(v.buffer.slice(0,9)))
+
+            for (let i = 0; i < this.text.length; i++) {
+                const ch = this.text[i];
+                const colorData = (this.colors && this.colors[i]) || new ColorData(255, 255, 255).serialize()
+                uint8.set(new Uint8Array(colorData), 10 + i*(10+9))
+                uint8.set(new Uint8Array(new CharacterData(ch).serialize()), 20 + i*(10+9))
+            }
+
+            let offset = 10 + this.text.length*(10+9)
+            uint8.set(new Uint8Array(new SpeedData(this.speed).serialize()), offset)
+            uint8.set(new Uint8Array(new TimeData(0).serialize()), offset+8)
+            uint8.set(new Uint8Array(new EffectData(0).serialize()), offset+8+10) // TODO
+            return v.buffer
+        }
+    }
+
+    class TimeData {
+        constructor(time) {
+            this.time = time
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(10))
+            v.setUint32(0, 10) // length
+            v.setUint16(4, 7) // type
+            v.setUint8(6, 0)
+            v.setUint16(7, this.time)
+            v.setUint8(9, calcChecksum(v.buffer.slice(0,9)))
+            return v.buffer
+        }
+    }
+
+    class EffectData {
+        constructor(effect) {
+            this.effect = effect
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(8))
+            v.setUint32(0, 8) // length
+            v.setUint16(4, 8) // type
+            v.setUint8(6, this.effect)
+            v.setUint8(7, calcChecksum(v.buffer.slice(0,7)))
+            return v.buffer
+        }
+    }
+
+    class SpeedData {
+        constructor(speed) {
+            this.speed = speed
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(8))
+            v.setUint32(0, 8) // length
+            v.setUint16(4, 9) // type
+            v.setUint8(6, this.speed)
+            v.setUint8(7, calcChecksum(v.buffer.slice(0,8)))
+            return v.buffer
+        }
+    }
+
+    class AnimationData {
+        constructor(frames, time, speed, effect) {
+            this.frames = frames
+            this.time = time
+            this.speed = speed
+            this.effect = effect
+        }
+
+        serialize() {
+            const frameData = this.frames.map(c => c.serialize())
+            const frameDataLen = frameData.reduce((sum, frame) => sum + frame.byteLength, 0)
+            const v = new DataView(new ArrayBuffer(9 + frameDataLen + 10 + 8 + 8))
+            const uint8 = new Uint8Array(v.buffer)
+            v.setUint32(0, 9) // length
+            v.setUint16(4, 11) // type
+            v.setUint16(6, this.frames.length)
+            v.setUint8(8, calcChecksum(v.buffer.slice(0,8)))
+            let offset = 9
+            for (let i = 0; i < frameData.length; i++) {
+                uint8.set(new Uint8Array(frameData[i]), offset)
+                offset += frameData[i].byteLength
+            }
+            uint8.set(new Uint8Array(new TimeData(this.time).serialize()), offset)
+            uint8.set(new Uint8Array(new SpeedData(this.speed).serialize()), offset+10)
+            uint8.set(new Uint8Array(new EffectData(this.effect).serialize()), offset+8+10) // TODO
+            return v.buffer
+        }
+    }
+
+    class FrameData {
+        constructor(width, height, bitmap, depth=1) {
+            this.width = width
+            this.height = height
+            this.bitmap = bitmap
+            this.depth = depth
+        }
+
+        serialize() {
+            const v = new DataView(new ArrayBuffer(12 + this.bitmap.byteLength))
+            const uint8 = new Uint8Array(v.buffer)
+            v.setUint32(0, 12 + this.bitmap.byteLength) // length
+            v.setUint16(4, 96) // type
+            v.setUint16(6, this.width)
+            v.setUint16(8, this.height)
+            v.setUint8(10, this.depth)
+            uint8.set(new Uint8Array(this.bitmap), 11)
+            v.setUint8(11 + this.bitmap.byteLength, calcChecksum(v.buffer))
+            return v.buffer
+        }
+    }
+
+    class GenericCommandResponse {
+        length
+        commandType
+        serialNo
+        errorCode
+        payload
+
+        constructor(data) {
+            let v = data
+            if (!(v instanceof DataView)) {
+                v = new DataView(data)
+            }
+            this.length = v.getUint8(0)
+            this.commandType = v.getUint8(1)
+            this.serialNo = v.getUint16(2)
+            this.errorCode = v.getUint8(4)
+            this.payload = v.buffer.slice(5, this.length + 5)
+        }
+
+        static parseCommand(data) {
+            const genericCommand = new GenericCommandResponse(data)
+
+            switch(genericCommand.commandType) {
+                case 2:
+                    return new SendingDataResponse(data)
+                case 4:
+                    return new SendingDataFinishResponse(data)
+                case 17:
+                    return new VersionResponse(data)
+                case 19:
+                    return new DisplayInfoResponse(data)
+                case 21:
+                    return new BufferSizeResponse(data)
+                    // Pause data transmission?
+                    // com.led.spotled.cmd (Constants.class)
+                    // Value is -2 so becomes 254 unsigned.
+                case 254:
+                    return genericCommand
+                  // Value is -1 so becomes 255 unsigned.
+                case 255:
+                    return new ContinueSendingResponse(data)
+                default:
+                    return genericCommand
+            }
+        }
+    }
+
+    class SendingDataResponse extends GenericCommandResponse{
+        constructor(data) {
+            super(data)
+
+            const v = new DataView(this.payload)
+            this.commandType = v.getUint16(0)
+        }
+    }
+
+    class SendingDataFinishResponse extends GenericCommandResponse{
+        constructor(data) {
+            super(data)
+
+            const v = new DataView(this.payload)
+            this.commandType = v.getUint16(0)
+        }
+    }
+
+    class VersionResponse extends GenericCommandResponse {
+        constructor(data) {
+            super(data)
+
+            const v = new DataView(this.payload)
+            this.deviceType = v.getUint16(0)
+            this.deviceRevision = v.getUint32(2)
+            this.softwareRevision = v.getUint32(6)
+        }
+    }
+
+    class DisplayInfoResponse extends GenericCommandResponse {
+        constructor(data) {
+            super(data)
+
+            const v = new DataView(this.payload)
+            this.width = v.getUint16(0)
+            this.height = v.getUint16(2)
+            this.colorDepth = v.getUint8(4)
+            this.frameLimit = v.getUint8(5)
+            this.brightness = v.getUint8(6)
+            this.fontInfo = v.getUint8(7)
+        }
+    }
+
+    class BufferSizeResponse extends GenericCommandResponse {
+        constructor(data) {
+            super(data)
+
+            const v = new DataView(this.payload)
+            this.bufferSize = v.getUint32(0)
+        }
+    }
+
+
+
+    class ContinueSendingResponse extends GenericCommandResponse {
+        constructor(data) {
+            super(data)
+            let v = data
+            if (!(v instanceof DataView)) {
+                v = new DataView(data)
+            }
+            this.errorCode = 0
+            this.commandType = v.getUint16(4)
+            this.continueFrom = v.getUint32(6)
+        }
+    }
+
+    class SpotLEDConnection {
+        #lastCmdSerialNumber = 0
+        #lastDataSerialNumber = 0
+        #commandResponse
+        #gattServer
+        #cmdService
+        #dataService
+
+        constructor(device) {
+            this.device = device
+
+            this.commandResponse = {}
+        }
+
+        async connect() {
+            console.log('Connecting to GATT Server...')
+            this.gattServer = await this.device.gatt.connect();
+
+            console.log('Getting Service...');
+            const service = await this.gattServer.getPrimaryService("0000ff20-0000-1000-8000-00805f9b34fb")
+
+            console.log('Getting Characteristics...');
+            this.cmdService = await service.getCharacteristic("0000ff21-0000-1000-8000-00805f9b34fb")
+            this.dataService = await service.getCharacteristic("0000ff22-0000-1000-8000-00805f9b34fb")
+
+//var blarg = new DataView(new ArrayBuffer(4))
+//blarg.setUint8(2,1)
+//this.cmdService.writeValue(blarg.buffer)
+
+            await this.cmdService.startNotifications()
+            this.cmdService.oncharacteristicvaluechanged = this.handleCharacteristicValueChanged.bind(this)
+            
+//await this.dataService.startNotifications()
+//this.dataService.oncharacteristicvaluechanged = this.data_service_value_change.bind(this)
+
+            this.displayInfo = await this.queryCommand(new GetDisplayInfoCommand())
+            this.bufferSize = (await this.queryCommand(new GetBufferSizeCommand())).bufferSize
+        }
+
+        nextCmdSerialNumber() {
+            return this.lastCmdSerialNumber = (this.lastCmdSerialNumber + 1) & 0xffff
+        }
+
+        nextDataSerialNumber() {
+            return this.lastDataSerialNumber = (this.lastDataSerialNumber + 1) & 0xffffffff
+        }
+
+        async sendDataInternal(dataCommand) {
+            dataCommand.serialNo = this.nextDataSerialNumber()
+
+            const payload = dataCommand.serialize()
+            console.log('senddatainternal, payload', payload)
+            const startCommand = new SendingDataStartCommand(dataCommand.commandType, payload.byteLength)
+            const response = await this.queryCommand(startCommand)
+            console.log('senddata start command response', response)
+
+            if (response.errorCode != 0) {
+                throw `senddata error: ${response.errorCode}`
+            }
+
+            const sendSize = 3000//20
+            const unackCount = Math.floor(this.bufferSize / Math.min(sendSize,payload.byteLength))
+            let sentPayloads = 0
+
+            for (let i = 0; i < payload.byteLength; i += sendSize) {
+                this.commandResponse[startCommand.serialNo] = new Deferred()
+                console.log(`writing payload bytes ${i}-${i+Math.min(sendSize,payload.byteLength)}`)
+                await this.dataService.writeValueWithoutResponse(payload.slice(i, i + sendSize))
+//const zcontinueResponse = await this.commandResponse[startCommand.serialNo].promise
+//console.log('data write response', zcontinueResponse)
+
+                sentPayloads++
+
+                // wait for continue if we have reached maximum number of unacknowledged packets
+                if (sentPayloads >= unackCount) {
+                    sentPayloads = 0
+                    console.log('waiting for continue')
+                    const continueResponse = await this.commandResponse[startCommand.serialNo].promise
+                    console.log('continue from', continueResponse)
+                    i = continueResponse.continueFrom - sendSize // since sendSize is added at end
+                }
+            }
+
+            const finishCommand = new SendingDataFinishCommand(dataCommand.commandType, payload.byteLength)
+            finishCommand.serialNo = startCommand.serialNo
+            return await this.queryCommand(finishCommand)
+        }
+
+        handleCharacteristicValueChanged(e) {
+            console.log('characteristicvaluechanged', e.target.value)
+            const cmdResponse = GenericCommandResponse.parseCommand(e.target.value)
+            console.log('parsed response', cmdResponse)
+            const deferred = this.commandResponse[cmdResponse.serialNo]
+            if (!deferred) {
+                throw "Unhandled response"
+            }
+            delete this.commandResponse[cmdResponse.serialNo]
+            deferred.resolve(cmdResponse)
+        }
+
+        data_service_value_change(e) {
+            console.log('data_service_value_change', e.target.value)
+        }
+
+        async queryCommand(command) {
+            await this.sendCommand(command)
+            this.commandResponse[command.serialNo] = new Deferred()
+            return this.commandResponse[command.serialNo].promise
+        }
+
+        async sendCommand(command) {
+            if (!this.gattServer || !this.gattServer.connected) {
+                await this.connect()
+            }
+
+            if (!command.serialNo) {
+                command.serialNo = this.nextCmdSerialNumber()
+            }
+            await this.cmdService.writeValueWithoutResponse(command.serialize())
+        }
+    }
+
+    class Font {
+        constructor(fontData) {
+            this.fontData = fontData
+        }
+
+        getChar(char) {
+            if (char in this.fontData) {
+                return this.fontData[char]
+            }
+            if ('\ufffd' in this.fontData) {
+                return this.fontData['\ufffd']
+            }
+            if ('\x00' in this.fontData) {
+                return this.fontData['\x00']
+            }
+            return this.fontData[' ']
+        }
+
+        createBitmap(charData, minLen) {
+            if (minLen % 8 != 0) {
+                minLen += 8 - (minLen % 8)
+            }
+
+            const trueChar = '@'
+            const bitmap = new Uint8Array(new ArrayBuffer(charData.length))
+            for (let i = 0; i < charData.length; i++) {
+                if (charData[i].length < minLen) {
+                    charData[i] = charData[i].padEnd('.', minLen)
+                } else {
+                    excess = charData[i].length % 8
+                    if (excess != 0) {
+                        charData[i] += '.'.repeat(8 - excess)
+                    }
+                }
+
+                for (let j = 0; j < charData[i].length; j += 8) {
+                    bitmap[i] = ((charData[i][j] == trueChar) << 7) |
+                        ((charData[i][j+1] == trueChar) << 6) |
+                        ((charData[i][j+2] == trueChar) << 5) |
+                        ((charData[i][j+3] == trueChar) << 4) |
+                        ((charData[i][j+4] == trueChar) << 3) |
+                        ((charData[i][j+5] == trueChar) << 2) |
+                        ((charData[i][j+6] == trueChar) << 1) |
+                        (charData[i][j+7] == trueChar);
+                }
+            }
+            console.log('bitmap', charData, bitmap)
+            return bitmap;
+        }
+
+        createFontCharacters(text, minHeight=12) {
+            const characters = []
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i]
+                let charData = this.getChar(char)
+                let height = charData.length
+                let width = charData[0].length
+                if (height < minHeight) {
+                    charData = Font.padCharacterToHeight(charData, minHeight, width)
+                    height = minHeight
+                }
+                // if (width < height) {
+                //     width = height
+                // }
+                characters.push(new FontCharacterData(width, height, char, this.createBitmap(charData, width)))
+            }
+            return characters
+        }
+
+        static padCharacterToHeight(charData, minHeight, minLength=0) {
+            const newCharData = [...charData]
+            const height = charData.length
+            const fillerLine = ''.padEnd(minLength, '.')
+            if (height < minHeight) {
+                const diff = minHeight - height
+                const prependRows = (Math.floor(diff / 2) + diff % 2)
+                const appendRows = (Math.floor(diff / 2))
+                for (let i = 0; i < prependRows; i++) {
+                    newCharData.unshift(fillerLine)
+                }
+                for (let i = 0; i < appendRows; i++) {
+                    newCharData.push(fillerLine)
+                }
+            }
+            return newCharData
+        }
+
+        static parseYaffFont(text) {
+            const lines = text.split('\n')
+            const fontData = {}
+            let currentChar = null
+            let lineAcc = []
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim()
+                if (line.startsWith('#')) {
+                    continue
+                }
+                if (line.endsWith(':') && (line.startsWith('0x') || line.startsWith('u+'))) {
+                    if (currentChar) {
+                        fontData[currentChar] = lineAcc
+                        lineAcc = []
+                    }
+                    currentChar = String.fromCodePoint(parseInt(line.slice(2, line.length-1), 16))
+                } else if (!line.includes(':') && (line.includes('.') || line.includes('@'))) {
+                    lineAcc.push(line)
+                }
+            }
+            if (currentChar) {
+                fontData[currentChar] = lineAcc
+            }
+            return new Font(fontData)
+        }
+    }
+
+
+    class SpotLED {
+        constructor(device) {
+            this.connection = new SpotLEDConnection(device)
+            this.fonts = {}
+        }
+
+        async connect() {
+            return await this.connection.connect()
+        }
+
+        async loadFont(fontUrl) {
+            if (this.fonts[fontUrl]) {
+                return this.fonts[fontUrl]
+            }
+
+            const text = await fetch(fontUrl).then(response => response.text())
+            const font = Font.parseYaffFont(text)
+            this.fonts[fontUrl] = font
+            return font
+        }
+
+        async setBrightness(brightness) {
+            if (!this.connection) {
+                throw "Not connected"
+            }
+
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new BrightnessData(brightness).serialize()))
+        }
+
+        async setScreenMode(mode) {
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new ScreenModeData(mode).serialize()))
+        }
+
+        async setTextByChars(text) {
+            const font = await this.loadFont('fonts/6x10.yaff')
+            const fontCharacters = font.createFontCharacters(text, this.connection.displayInfo.height)
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new FontData(fontCharacters).serialize()))
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new TextData(text, 0, "SCROLL_LEFT").serialize()))
+        }
+
+        async setAnimation(bitmaps, time=0, speed=0, effects=0) {
+            const frames = bitmaps.map(bitmap => new FrameData(this.connection.displayInfo.width, this.connection.displayInfo.height, bitmap))
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new AnimationData(frames, time, speed, effects).serialize()))
+        }
+
+        async setBitmap(bitmap) {
+            const frames = [new FrameData(this.connection.displayInfo.width, this.connection.displayInfo.height, bitmap)]
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new AnimationData(frames, 0, 0, 0).serialize()))
+        }
+
+        async clearDisplay() {
+            const bitmap = new Uint8Array(Math.floor(this.connection.displayInfo.width * this.connection.displayInfo.height / 8))
+            bitmap.fill(0x00)
+            const frames = [new FrameData(this.connection.displayInfo.width, this.connection.displayInfo.height, bitmap)]
+            await this.connection.sendDataInternal(new SendDataCommand(32772, new AnimationData(frames, 0, 0, 0).serialize()))
+        }
+    }
+
+    let led = null
+    const canvas = document.querySelector('#canvas')
+    const canvasctx = canvas.getContext('2d', { willReadFrequently: true })
+    canvasctx.imageSmoothingEnabled = false
+
+    const fontSelector = document.querySelector('#font')
+
+    canvasctx.fillStyle="white"
+    canvasctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    let isDrawing = false
+    let isErasing = false
+    let x = 0
+    let y = 0
+
+    function loadFile(file) {
+        const deferred = new Deferred()
+        const img = document.createElement('img')
+        img.onerror = (e) => deferred.reject(e)
+        img.onload = (e) => {
+            canvasctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+            thresholdCanvas(canvasctx, canvas.width, canvas.height)
+            deferred.resolve()
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            img.src = e.target.result
+        }
+        reader.onerror = (e) => deferred.reject(e)
+        reader.readAsDataURL(file)
+        return deferred.promise
+    }
+
+    canvas.addEventListener("dragenter", (e) => {
+        e.dataTransfer.types.includes("Files") && e.preventDefault()
+    })
+
+    canvas.addEventListener("dragover", (e) => {
+        e.dataTransfer.types.includes("Files") && e.preventDefault()
+    })
+
+    canvas.addEventListener('drop', async (e) => {
+        for (let i = 0; i < e.dataTransfer.files.length; i++) {
+            const file = e.dataTransfer.files[i];
+            if(file.type.startsWith('image/')) {
+                e.preventDefault()
+                await loadFile(file)
+            }
+        }
+    })
+
+    canvas.addEventListener('pointerdown', (e) => {
+        e.preventDefault()
+        x = e.offsetX
+        y = e.offsetY
+        isDrawing = (e.button == 0)
+        isErasing = (e.button == 2 || e.button == 5) // right click or pen eraser
+        if (isDrawing) {
+            canvasctx.strokeStyle = 'black'
+            canvasctx.lineWidth = 1;
+        } else {
+            canvasctx.strokeStyle = 'white'
+            canvasctx.lineWidth = 1;
+        }
+        // set the individual pixel
+        drawPixel(canvasctx, x, y, canvasctx.strokeStyle)
+    })
+
+    canvas.addEventListener('contextmenu', (e) => {
+        e.preventDefault()
+    })
+
+
+    canvas.addEventListener('touchmove', (e) => {
+        if (isDrawing || isErasing) {
+            e.preventDefault()
+        }
+    }, { passive: true})
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (isDrawing || isErasing) {
+            e.preventDefault()
+            drawLine(canvasctx, x, y, e.offsetX, e.offsetY)
+            x = e.offsetX
+            y = e.offsetY
+        }
+    })
+
+    document.addEventListener('pointerup', (e) => {
+        if (isDrawing || isErasing) {
+            e.preventDefault()
+            drawLine(canvasctx, x, y, e.offsetX, e.offsetY)
+
+            thresholdCanvas(canvasctx, canvas.width, canvas.height)
+            x = 0
+            y = 0
+            isDrawing = false
+            isErasing = false
+        }
+    })
+
+    document.querySelector('#canvas').addEventListener('blur', (e) => {
+        isDrawing = false;
+    })
+
+    function rgbaThreshold(data, offset) {
+        const threshold = document.querySelector('#threshold').value
+        return data[offset+3] < (255-threshold) || // alpha channel is transparent OR
+            (data[offset] + data[offset+1] + data[offset+2]) / 3 > threshold // rgb avg > threshold
+    }
+
+    function thresholdCanvas(ctx, width, height) {
+        const imageData = ctx.getImageData(0, 0, width, height)
+
+        // greyscale thresholding
+        const data = imageData.data
+        for (let i = 0; i < data.length; i++) {
+            const dataOffset = i*4
+            const bitmapOffset = Math.floor(i / 8)
+            const bitmapBitOffset = 7 - (i % 8)
+            if (rgbaThreshold(data, dataOffset)) {
+                data[dataOffset] = 255
+                data[dataOffset+1] = 255
+                data[dataOffset+2] = 255
+                data[dataOffset+3] = 255
+            } else {
+                data[dataOffset] = 0
+                data[dataOffset+1] = 0
+                data[dataOffset+2] = 0
+                data[dataOffset+3] = 255
+            }
+        }
+
+        ctx.putImageData(imageData, 0, 0)
+
+        return imageData.data
+    }
+
+    function convertImageToBitmap(imageData) {
+        const bitmapData = new Uint8Array(new ArrayBuffer(canvas.width * canvas.height / 8))
+        for (let i = 0; i < imageData.length; i++) {
+            const dataOffset = i*4
+            const bitmapOffset = Math.floor(i / 8)
+            const bitmapBitOffset = 7 - (i % 8)
+            if (rgbaThreshold(imageData, dataOffset)) {
+                bitmapData[bitmapOffset] = bitmapData[bitmapOffset] & ~(1<<bitmapBitOffset)
+            } else {
+                bitmapData[bitmapOffset] = bitmapData[bitmapOffset] | (1<<bitmapBitOffset)
+            }
+        }
+        return bitmapData
+    }
+
+    function drawLine(context, x1, y1, x2, y2) {
+        // scale values
+        const scaleX = canvas.offsetWidth / canvas.width
+        const scaleY = canvas.offsetHeight / canvas.height
+        x1 = x1 / scaleX
+        x2 = x2 / scaleX
+        y1 = y1 / scaleY
+        y2 = y2 / scaleY
+
+        context.beginPath();
+        context.moveTo(x1, y1);
+        context.lineTo(x2, y2);
+        context.stroke();
+        context.closePath();
+    }
+
+    function drawPixel(context, x, y, style) {
+        const scaleX = canvas.offsetWidth / canvas.width
+        const scaleY = canvas.offsetHeight / canvas.height
+        context.fillStyle = style
+        context.fillRect(Math.floor(x / scaleX),Math.floor(y / scaleY),1,1)
+    }
+
+    async function drawText(text) {
+        const canvas2 = document.querySelector('#canvas2')
+        const letterSpacing = `${document.querySelector('#letterSpacing').value}px`
+        const fontSize = `${document.querySelector('#font_size').value}px`
+        // let letterSpacing = '-0.7px'
+        let yOffset = 0
+        if (fontSelector.value == "Silkscreen") {
+            yOffset = -2
+            // letterSpacing = '-2px'
+        }
+
+        canvas2.style.letterSpacing = letterSpacing
+        const ctx = canvas2.getContext('2d', { willReadFrequently: true })
+        canvas2.height = 12
+        
+        ctx.font=`normal ${fontSize} '${fontSelector.value}'`
+        ctx.textBaseline="top"
+        const textMeasurement = ctx.measureText(text)
+        canvas2.width = textMeasurement.width
+        canvas2.style.letterSpacing = letterSpacing
+        ctx.fillStyle="white"
+        ctx.fillRect(0,0, Math.ceil(canvas2.width / canvas.width) * canvas.width, canvas2.height)
+        ctx.fillStyle="black"
+        ctx.font=`normal ${fontSize} '${fontSelector.value}'`
+        ctx.textBaseline="top"
+        ctx.fillText(text, 0, yOffset)
+        thresholdCanvas(ctx, canvas2.width, canvas2.height)
+        if (!led) {
+            return
+        }
+
+        const frames = []
+        for (let x = 0; x < canvas2.width; x += 48) {
+            const imageData = ctx.getImageData(x, 0, canvas.width, canvas.height)
+            const bitmapData = convertImageToBitmap(imageData.data)
+
+            frames.push(bitmapData)
+        }
+        const speed = document.querySelector('#speed').value
+        await led.setAnimation(frames, 1000, speed, 3)
+    }
+
+    document.querySelector('#upload').addEventListener('change', async (e) => {
+        await loadFile(e.target.files[0])
+    })
+
+    document.querySelector('#set_image').addEventListener('click', async (e) => {
+        e.preventDefault()
+        const imageData = thresholdCanvas(canvasctx, canvas.width, canvas.height)
+
+        if (led) {
+            const bitmapData = convertImageToBitmap(imageData)
+            await led.setBitmap(bitmapData)
+        }
+    })
+
+    document.querySelector('#set_text2').addEventListener('click', async (e) => {
+        e.preventDefault();
+        await drawText(document.querySelector('#text2').value)
+    })
+
+    document.querySelector('#set_time').addEventListener('click', async (e) => {
+        await drawText((new Date()).toLocaleString())
+    })
+
+    document.querySelector('#brightness').addEventListener('change', async (e) => {
+        console.log('set brightness', e.target.value)
+        await led.setBrightness(e.target.value)
+    })
+
+    document.querySelector('#display_mode').addEventListener('change', async (e) => {
+        console.log('display_mode', e.target.value)
+        await led.setScreenMode(e.target.value)
+    })
+
+    document.querySelector('#set_text').addEventListener('click', async (e) => {
+        e.preventDefault();
+        await led.setTextByChars(document.querySelector('#text').value)
+    })
+
+    document.querySelector('#clear_canvas').addEventListener('click', (e) => {
+        canvasctx.fillStyle="white"
+        canvasctx.fillRect(0, 0, canvas.width, canvas.height)
+    })
+
+    document.querySelector('#clear').addEventListener('click', async (e) => {
+        e.preventDefault()
+        await led.clearDisplay()
+    })
+
+    document.querySelector('#font_size').addEventListener('input', (e) => {
+        document.querySelector('#font_size_value').textContent = `${e.target.value}px`
+    })
+
+    document.querySelector('#letterSpacing').addEventListener('input', (e) => {
+        document.querySelector('#letterSpacingValue').textContent = `${e.target.value}px`
+    })
+
+    document.querySelector('#search').addEventListener('click', async (e) => {
+        console.log('Requesting Bluetooth Device...');
+        const device = await navigator.bluetooth.requestDevice({
+            filters: [
+                { namePrefix: "SpotLED" },
+            ],
+            optionalServices: [parseInt("0xff20")]
+        })
+        device.ongattserverdisconnected = ()=> {
+            console.log('gatt server disconnected')
+            document.querySelector('#connection_status').textContent = `Disconnected from ${device.name}`
+        }
+
+        led = new SpotLED(device)
+        await led.connect()
+        document.querySelector('#connection_status').textContent = `Connected to ${device.name}`
+        document.querySelector('#display_info').textContent = `${led.connection.displayInfo.width}x${led.connection.displayInfo.height}`
+        canvas.width = led.connection.displayInfo.width
+        canvas.height = led.connection.displayInfo.height
+        canvasctx.fillStyle="white"
+        canvasctx.fillRect(0, 0, canvas.width, canvas.height)
+        document.querySelector('#brightness').value = led.connection.displayInfo.brightness
+        document.querySelector('#brightness').disabled = false
+        document.querySelector('#speed').disabled = false
+        document.querySelector('#display_mode').disabled = false
+        document.querySelector('#set_text').disabled = false
+        document.querySelector('#clear').disabled = false
+    })
+</script>
+</body>
