@@ -620,7 +620,7 @@
                 throw `senddata error: ${response.errorCode}`
             }
 
-            const sendSize = 3000//20
+            const sendSize = 40//20
             const unackCount = Math.floor(this.bufferSize / Math.min(sendSize,payload.byteLength))
             let sentPayloads = 0
 
